@@ -183,7 +183,7 @@ async def test_zappi_charge_mode_waits_while_command_in_progress(
     entry = await setup_mock_myenergi_config_entry(hass)
     await _select_charge_mode(hass, "Eco+")
 
-    freezer.tick(timedelta(minutes=9))
+    freezer.tick(timedelta(minutes=4))
     await _poll(hass, entry, zmo=1, cmt=cmt)
     assert mock_zappi_set_charge_mode.call_count == 1
     assert hass.states.get(TEST_ZAPPI_SELECT_CHARGE_MODE).state == "Eco+"
@@ -196,10 +196,34 @@ async def test_zappi_charge_mode_resent_after_pending_timeout(
     entry = await setup_mock_myenergi_config_entry(hass)
     await _select_charge_mode(hass, "Eco+")
 
-    freezer.tick(timedelta(minutes=10))
-    await _poll(hass, entry, zmo=1, cmt=120)
+    freezer.tick(timedelta(minutes=5))
+    await _poll(hass, entry, zmo=1, cmt=60)
     assert mock_zappi_set_charge_mode.call_count == 2
     assert hass.states.get(TEST_ZAPPI_SELECT_CHARGE_MODE).state == "Eco+"
+
+
+async def test_zappi_charge_mode_waits_for_each_resend(
+    hass: HomeAssistant, mock_zappi_set_charge_mode: MagicMock, freezer
+) -> None:
+    """A resend still in progress is waited for, however long ago the first was."""
+    entry = await setup_mock_myenergi_config_entry(hass)
+    await _select_charge_mode(hass, "Eco+")
+
+    for attempt in (2, 3):
+        freezer.tick(timedelta(seconds=258))
+        await _poll(hass, entry, zmo=1, cmt=253)
+        assert mock_zappi_set_charge_mode.call_count == attempt
+
+    freezer.tick(timedelta(minutes=2))
+    await _poll(hass, entry, zmo=1, cmt=24)
+    assert mock_zappi_set_charge_mode.call_count == 3
+    assert hass.states.get(TEST_ZAPPI_SELECT_CHARGE_MODE).state == "Eco+"
+
+    freezer.tick(timedelta(minutes=1))
+    await _poll(hass, entry, zmo=3)
+    state = hass.states.get(TEST_ZAPPI_SELECT_CHARGE_MODE)
+    assert state.state == "Eco+"
+    assert "reported_charge_mode" not in state.attributes
 
 
 async def test_zappi_charge_mode_logs_progress(

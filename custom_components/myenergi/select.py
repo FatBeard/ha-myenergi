@@ -28,8 +28,9 @@ ZAPPI_PHASE_SETTING = ["1", "3", "auto"]
 # applying it, at least ZAPPI_MODE_RETRY_AFTER after the last send.
 ZAPPI_MODE_RETRY_AFTER = timedelta(seconds=30)
 # Stop waiting on a zappi that reports a command in progress this long after
-# the first send. myenergi say their servers keep retrying for up to 10 minutes.
-ZAPPI_MODE_PENDING_TIMEOUT = timedelta(minutes=10)
+# the last send. myenergi report failure (cmt 253) about 4 minutes in, so this
+# only applies if that never arrives.
+ZAPPI_MODE_PENDING_TIMEOUT = timedelta(minutes=5)
 ZAPPI_MODE_MAX_ATTEMPTS = 3
 # cmt counts up from 1 while a command is in progress (it has been seen above
 # 50), then reads 253 on failure, 254 on success or 255 for no command.
@@ -271,7 +272,7 @@ class ZappiChargeModeSelect(MyenergiEntity, SelectEntity):
             return
         if now - self._pending_sent_at < ZAPPI_MODE_RETRY_AFTER or (
             cmt in ZAPPI_CMT_PENDING
-            and now - self._pending_first_sent_at < ZAPPI_MODE_PENDING_TIMEOUT
+            and now - self._pending_sent_at < ZAPPI_MODE_PENDING_TIMEOUT
         ):
             _LOGGER.debug(
                 "%s waiting for charge mode %s, reports %s (cmt %s, %ss, attempt %s)",
