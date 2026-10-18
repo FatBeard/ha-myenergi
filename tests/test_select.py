@@ -92,14 +92,13 @@ async def test_eddi_select(
 
 
 @contextmanager
-def _zappi_reports(zmo: int, cmt: int):
-    """Make polls report the given mode and command status for Test Zappi 1."""
+def _device_reports(kind: str, sno: int, **fields):
+    """Make polls report the given fields for one device."""
     data = copy.deepcopy(load_fixture_json("client"))
     for grp in data["devices"]:
-        for device in grp.get("zappi", []):
-            if device["sno"] == 16042300:
-                device["zmo"] = zmo
-                device["cmt"] = cmt
+        for device in grp.get(kind, []):
+            if device["sno"] == sno:
+                device.update(fields)
     with (
         patch("pymyenergi.client.MyenergiClient.fetch_data", return_value=data),
         patch(
@@ -114,10 +113,14 @@ def _zappi_reports(zmo: int, cmt: int):
         yield
 
 
-async def _poll(hass: HomeAssistant, entry, zmo: int, cmt: int = 254) -> None:
-    with _zappi_reports(zmo, cmt):
+async def _poll_device(hass: HomeAssistant, entry, kind: str, sno: int, **fields):
+    with _device_reports(kind, sno, **fields):
         await hass.data[DOMAIN][entry.entry_id].async_refresh()
         await hass.async_block_till_done()
+
+
+async def _poll(hass: HomeAssistant, entry, zmo: int, cmt: int = 254) -> None:
+    await _poll_device(hass, entry, "zappi", 16042300, zmo=zmo, cmt=cmt)
 
 
 async def _select_charge_mode(hass: HomeAssistant, option: str) -> None:
@@ -237,7 +240,7 @@ async def test_zappi_charge_mode_logs_progress(
     entry = await setup_mock_myenergi_config_entry(hass)
     await _select_charge_mode(hass, "Eco+")
     assert (
-        "charge mode Eco+ requested, reports Fast (cmt 254, zappi time 18:45:19)"
+        "charge mode Eco+ requested, reports Fast (cmt 254, device time 18:45:19)"
         in caplog.text
     )
 
@@ -245,14 +248,14 @@ async def test_zappi_charge_mode_logs_progress(
     await _poll(hass, entry, zmo=1, cmt=8)
     assert (
         "waiting for charge mode Eco+, reports Fast "
-        "(cmt 8, zappi time 18:45:19, attempt 1, 40s since first send, "
+        "(cmt 8, device time 18:45:19, attempt 1, 40s since first send, "
         "40s since last)" in caplog.text
     )
 
     freezer.tick(timedelta(seconds=20))
     await _poll(hass, entry, zmo=3)
     assert (
-        "reports charge mode Eco+ (cmt 254, zappi time 18:45:19, attempt 1, "
+        "reports charge mode Eco+ (cmt 254, device time 18:45:19, attempt 1, "
         "60s since first send, 60s since last), done waiting for Eco+" in caplog.text
     )
 
@@ -332,3 +335,54 @@ async def test_zappi_charge_mode_new_selection_replaces_pending(
     await _poll(hass, entry, zmo=4)
     mock_zappi_set_charge_mode.assert_called_with("Eco+")
     assert mock_zappi_set_charge_mode.call_count == 3
+
+
+async def _select_eddi_mode(hass: HomeAssistant, option: str) -> None:
+    await hass.services.async_call(
+        SELECT_DOMAIN,
+        SERVICE_SELECT_OPTION,
+        {ATTR_ENTITY_ID: TEST_EDDI_SELECT_OP_MODE, ATTR_OPTION: option},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+
+async def test_eddi_operating_mode_survives_stale_poll(
+    hass: HomeAssistant, mock_eddi_set_operating_mode: MagicMock, freezer
+) -> None:
+    """A poll taken before the eddi applies the mode must not revert it."""
+    entry = await setup_mock_myenergi_config_entry(hass)
+    assert hass.states.get(TEST_EDDI_SELECT_OP_MODE).state == "Normal"
+
+    await _select_eddi_mode(hass, "Stopped")
+    freezer.tick(timedelta(seconds=10))
+    await _poll_device(hass, entry, "eddi", 10088800, sta=1, cmt=254)
+    state = hass.states.get(TEST_EDDI_SELECT_OP_MODE)
+    assert state.state == "Stopped"
+    assert state.attributes["reported_operating_mode"] == "Normal"
+
+    freezer.tick(timedelta(seconds=10))
+    await _poll_device(hass, entry, "eddi", 10088800, sta=6, cmt=254)
+    state = hass.states.get(TEST_EDDI_SELECT_OP_MODE)
+    assert state.state == "Stopped"
+    assert "reported_operating_mode" not in state.attributes
+    assert mock_eddi_set_operating_mode.call_count == 1
+
+
+async def test_eddi_operating_mode_resent_when_not_applied(
+    hass: HomeAssistant, mock_eddi_set_operating_mode: MagicMock, freezer
+) -> None:
+    """An unapplied mode is resent, then given up on after the max attempts."""
+    entry = await setup_mock_myenergi_config_entry(hass)
+    await _select_eddi_mode(hass, "Stopped")
+
+    for attempt in (2, 3):
+        freezer.tick(timedelta(minutes=2))
+        await _poll_device(hass, entry, "eddi", 10088800, sta=1, cmt=254)
+        assert mock_eddi_set_operating_mode.call_count == attempt
+        mock_eddi_set_operating_mode.assert_called_with("Stopped")
+
+    freezer.tick(timedelta(minutes=2))
+    await _poll_device(hass, entry, "eddi", 10088800, sta=1, cmt=254)
+    assert mock_eddi_set_operating_mode.call_count == 3
+    assert hass.states.get(TEST_EDDI_SELECT_OP_MODE).state == "Normal"
