@@ -24,12 +24,14 @@ ZAPPI_PHASE_SETTING = ["1", "3", "auto"]
 # Mode commands are fire-and-forget: the API acknowledges them once queued and
 # the myenergi servers relay them to the zappi later, so polls taken in the
 # meantime still report the old mode. While a requested mode is unconfirmed we
-# keep showing it, and resend it if the last command finished without the zappi
-# applying it, at least ZAPPI_MODE_RETRY_AFTER after the last send.
-ZAPPI_MODE_RETRY_AFTER = timedelta(seconds=30)
-# Stop waiting on a zappi that reports a command in progress this long after
-# the last send. myenergi report failure (cmt 253) about 4 minutes in, so this
-# only applies if that never arrives.
+# keep showing it, and resend it once the last send has finished without the
+# zappi applying it.
+# Until myenergi start on a send, cmt still shows the previous command's
+# result, so a send that hasn't started within this long is treated as lost.
+ZAPPI_MODE_START_TIMEOUT = timedelta(minutes=2)
+# Stop waiting on a send still in progress this long after it was sent.
+# myenergi report failure (cmt 253) about 4 minutes in, so this only applies if
+# that never arrives.
 ZAPPI_MODE_PENDING_TIMEOUT = timedelta(minutes=5)
 ZAPPI_MODE_MAX_ATTEMPTS = 3
 # cmt counts up from 1 while a command is in progress (it has been seen above
@@ -192,6 +194,7 @@ class ZappiChargeModeSelect(MyenergiEntity, SelectEntity):
         self._pending_first_sent_at = None
         self._pending_sent_at = None
         self._pending_attempts = 0
+        self._pending_send_started = False
         self._resend_task = None
 
     @property
@@ -229,6 +232,7 @@ class ZappiChargeModeSelect(MyenergiEntity, SelectEntity):
         self._pending_mode = option
         self._pending_first_sent_at = self._pending_sent_at = dt_util.utcnow()
         self._pending_attempts = 1
+        self._pending_send_started = False
         self.async_schedule_update_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:
@@ -247,67 +251,58 @@ class ZappiChargeModeSelect(MyenergiEntity, SelectEntity):
 
     def _check_pending_mode(self) -> None:
         reported = self.device.charge_mode
-        now = dt_util.utcnow()
         cmt = self.device.data.get("cmt")
-        elapsed = int((now - self._pending_first_sent_at).total_seconds())
-        if reported == self._pending_mode:
+        now = dt_util.utcnow()
+        since_send = now - self._pending_sent_at
+        self._pending_send_started |= cmt in ZAPPI_CMT_PENDING
+        status = "cmt %s, attempt %s, %ss since first send, %ss since last" % (
+            cmt,
+            self._pending_attempts,
+            int((now - self._pending_first_sent_at).total_seconds()),
+            int(since_send.total_seconds()),
+        )
+        # Done once the zappi applies the mode, or it's changed elsewhere
+        if reported == self._pending_mode or reported not in self._stale_modes:
             _LOGGER.debug(
-                "%s confirmed charge mode %s after %ss (attempt %s, cmt %s)",
+                "%s reports charge mode %s (%s), done waiting for %s",
                 self.device.name,
                 reported,
-                elapsed,
-                self._pending_attempts,
-                cmt,
-            )
-            self._pending_mode = None
-            return
-        if reported not in self._stale_modes:
-            _LOGGER.debug(
-                "%s charge mode changed to %s elsewhere, no longer waiting for %s",
-                self.device.name,
-                reported,
+                status,
                 self._pending_mode,
             )
             self._pending_mode = None
             return
-        if now - self._pending_sent_at < ZAPPI_MODE_RETRY_AFTER or (
-            cmt in ZAPPI_CMT_PENDING
-            and now - self._pending_sent_at < ZAPPI_MODE_PENDING_TIMEOUT
+        if (cmt in ZAPPI_CMT_PENDING and since_send < ZAPPI_MODE_PENDING_TIMEOUT) or (
+            not self._pending_send_started and since_send < ZAPPI_MODE_START_TIMEOUT
         ):
             _LOGGER.debug(
-                "%s waiting for charge mode %s, reports %s (cmt %s, %ss, attempt %s)",
+                "%s waiting for charge mode %s, reports %s (%s)",
                 self.device.name,
                 self._pending_mode,
                 reported,
-                cmt,
-                elapsed,
-                self._pending_attempts,
+                status,
             )
             return
         if self._pending_attempts >= ZAPPI_MODE_MAX_ATTEMPTS:
             _LOGGER.warning(
-                "%s did not change charge mode to %s after %s attempts and %ss, "
-                "it still reports %s (cmt %s)",
+                "%s did not change charge mode to %s, it still reports %s (%s)",
                 self.device.name,
                 self._pending_mode,
-                self._pending_attempts,
-                elapsed,
                 reported,
-                cmt,
+                status,
             )
             self._pending_mode = None
             return
-        self._pending_attempts += 1
-        self._pending_sent_at = now
         _LOGGER.debug(
-            "%s reports charge mode %s (cmt %s, %ss), resending %s (attempt %s)",
+            "%s reports charge mode %s (%s), resending %s",
             self.device.name,
             reported,
-            cmt,
-            elapsed,
+            status,
             self._pending_mode,
-            self._pending_attempts,
         )
+        self._pending_attempts += 1
+        self._pending_sent_at = now
+        self._pending_send_started = False
         self._cancel_resend()
         self._resend_task = self.config_entry.async_create_background_task(
             self.hass,

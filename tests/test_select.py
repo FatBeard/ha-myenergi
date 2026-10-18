@@ -163,13 +163,13 @@ async def test_zappi_charge_mode_resent_when_not_applied(
     await _select_charge_mode(hass, "Stopped")
 
     for attempt in (2, 3):
-        freezer.tick(timedelta(seconds=60))
+        freezer.tick(timedelta(minutes=2))
         await _poll(hass, entry, zmo=1)
         assert mock_zappi_set_charge_mode.call_count == attempt
         mock_zappi_set_charge_mode.assert_called_with("Stopped")
         assert hass.states.get(TEST_ZAPPI_SELECT_CHARGE_MODE).state == "Stopped"
 
-    freezer.tick(timedelta(seconds=60))
+    freezer.tick(timedelta(minutes=2))
     await _poll(hass, entry, zmo=1)
     assert mock_zappi_set_charge_mode.call_count == 3
     assert hass.states.get(TEST_ZAPPI_SELECT_CHARGE_MODE).state == "Fast"
@@ -240,22 +240,39 @@ async def test_zappi_charge_mode_logs_progress(
 
     freezer.tick(timedelta(seconds=40))
     await _poll(hass, entry, zmo=1, cmt=8)
-    assert "waiting for charge mode Eco+, reports Fast (cmt 8, 40s" in caplog.text
+    assert (
+        "waiting for charge mode Eco+, reports Fast "
+        "(cmt 8, attempt 1, 40s since first send, 40s since last)" in caplog.text
+    )
 
     freezer.tick(timedelta(seconds=20))
     await _poll(hass, entry, zmo=3)
-    assert "confirmed charge mode Eco+ after 60s (attempt 1, cmt 254)" in caplog.text
+    assert (
+        "reports charge mode Eco+ (cmt 254, attempt 1, 60s since first send, "
+        "60s since last), done waiting for Eco+" in caplog.text
+    )
 
 
-async def test_zappi_charge_mode_stale_failure_does_not_skip_wait(
-    hass: HomeAssistant, mock_zappi_set_charge_mode: MagicMock
+async def test_zappi_charge_mode_stale_result_does_not_skip_wait(
+    hass: HomeAssistant, mock_zappi_set_charge_mode: MagicMock, freezer
 ) -> None:
-    """cmt 253 may be left over from an earlier command, so still wait."""
+    """cmt still shows the previous result until myenergi start on a send."""
     entry = await setup_mock_myenergi_config_entry(hass)
     await _select_charge_mode(hass, "Eco+")
 
+    freezer.tick(timedelta(seconds=60))
     await _poll(hass, entry, zmo=1, cmt=253)
     assert mock_zappi_set_charge_mode.call_count == 1
+
+    freezer.tick(timedelta(seconds=30))
+    await _poll(hass, entry, zmo=1, cmt=18)
+    freezer.tick(timedelta(minutes=3))
+    await _poll(hass, entry, zmo=1, cmt=253)
+    assert mock_zappi_set_charge_mode.call_count == 2
+
+    freezer.tick(timedelta(seconds=60))
+    await _poll(hass, entry, zmo=1, cmt=253)
+    assert mock_zappi_set_charge_mode.call_count == 2
     assert hass.states.get(TEST_ZAPPI_SELECT_CHARGE_MODE).state == "Eco+"
 
 
@@ -289,7 +306,7 @@ async def test_zappi_charge_mode_failed_poll_is_not_confirmation(
             await hass.async_block_till_done()
         assert not coordinator.last_update_success
 
-        freezer.tick(timedelta(seconds=60))
+        freezer.tick(timedelta(minutes=2))
         await _poll(hass, entry, zmo=1)
         assert mock_get.call_count == 2
         assert hass.states.get(TEST_ZAPPI_SELECT_CHARGE_MODE).state == "Stopped"
@@ -307,7 +324,7 @@ async def test_zappi_charge_mode_new_selection_replaces_pending(
     await _poll(hass, entry, zmo=4)
     assert hass.states.get(TEST_ZAPPI_SELECT_CHARGE_MODE).state == "Eco+"
 
-    freezer.tick(timedelta(seconds=60))
+    freezer.tick(timedelta(minutes=2))
     await _poll(hass, entry, zmo=4)
     mock_zappi_set_charge_mode.assert_called_with("Eco+")
     assert mock_zappi_set_charge_mode.call_count == 3
