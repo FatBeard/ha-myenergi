@@ -222,11 +222,12 @@ class ZappiChargeModeSelect(MyenergiEntity, SelectEntity):
             self._stale_modes.add(self._pending_mode)
         self._pending_mode = None
         _LOGGER.debug(
-            "%s charge mode %s requested, reports %s (cmt %s)",
+            "%s charge mode %s requested, reports %s (cmt %s, zappi time %s)",
             self.device.name,
             option,
             self.device.charge_mode,
             self.device.data.get("cmt"),
+            self.device.time,
         )
         await self.device.set_charge_mode(option)
         self._pending_mode = option
@@ -255,11 +256,15 @@ class ZappiChargeModeSelect(MyenergiEntity, SelectEntity):
         now = dt_util.utcnow()
         since_send = now - self._pending_sent_at
         self._pending_send_started |= cmt in ZAPPI_CMT_PENDING
-        status = "cmt %s, attempt %s, %ss since first send, %ss since last" % (
-            cmt,
-            self._pending_attempts,
-            int((now - self._pending_first_sent_at).total_seconds()),
-            int(since_send.total_seconds()),
+        status = (
+            "cmt %s, zappi time %s, attempt %s, %ss since first send, %ss since last"
+            % (
+                cmt,
+                self.device.time,
+                self._pending_attempts,
+                int((now - self._pending_first_sent_at).total_seconds()),
+                int(since_send.total_seconds()),
+            )
         )
         # Done once the zappi applies the mode, or it's changed elsewhere
         if reported == self._pending_mode or reported not in self._stale_modes:

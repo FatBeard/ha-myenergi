@@ -236,20 +236,24 @@ async def test_zappi_charge_mode_logs_progress(
     caplog.set_level(logging.DEBUG, logger="custom_components.myenergi")
     entry = await setup_mock_myenergi_config_entry(hass)
     await _select_charge_mode(hass, "Eco+")
-    assert "charge mode Eco+ requested, reports Fast" in caplog.text
+    assert (
+        "charge mode Eco+ requested, reports Fast (cmt 254, zappi time 18:45:19)"
+        in caplog.text
+    )
 
     freezer.tick(timedelta(seconds=40))
     await _poll(hass, entry, zmo=1, cmt=8)
     assert (
         "waiting for charge mode Eco+, reports Fast "
-        "(cmt 8, attempt 1, 40s since first send, 40s since last)" in caplog.text
+        "(cmt 8, zappi time 18:45:19, attempt 1, 40s since first send, "
+        "40s since last)" in caplog.text
     )
 
     freezer.tick(timedelta(seconds=20))
     await _poll(hass, entry, zmo=3)
     assert (
-        "reports charge mode Eco+ (cmt 254, attempt 1, 60s since first send, "
-        "60s since last), done waiting for Eco+" in caplog.text
+        "reports charge mode Eco+ (cmt 254, zappi time 18:45:19, attempt 1, "
+        "60s since first send, 60s since last), done waiting for Eco+" in caplog.text
     )
 
 
